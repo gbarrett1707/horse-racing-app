@@ -98,7 +98,10 @@ def performance_rating(row, winner_rating, winner_weight, lbs_per_len):
     return winner_rating - (dist_btn * lbs_per_len) + wt_diff
 
 # Infer race code
-df['RaceCode'] = df['Type'].map(lambda x: 'Flat' if x in ['f', 'a'] else 'Jumps')
+if 'Type' not in df.columns:
+    st.error("❌ The uploaded file is missing the required column: 'Type'.")
+    st.stop()
+)
 
 # Calculate distance and adjusted weight
 df['DistanceF'] = df.apply(get_distance_f, axis=1)
