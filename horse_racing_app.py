@@ -3,8 +3,11 @@ import numpy as np
 import os
 from datetime import datetime
 
-# Define your file path
-file_path = os.path.expanduser("~/Downloads/Racing Data Split/racing_data upload.csv")
+import streamlit as st
+import pandas as pd
+
+# Upload section
+uploaded_file = st.file_uploader("Upload your racing data CSV", type=["csv"])
 
 # Explicitly define column types to avoid dtype warnings
 dtype_overrides = {
@@ -27,8 +30,16 @@ dtype_overrides = {
     'OR': str
 }
 
-# Load the data with defined types and suppress mixed-type warning
-df = pd.read_csv(file_path, dtype=dtype_overrides, low_memory=False)
+# Only process if file is uploaded
+if uploaded_file is not None:
+    try:
+        df = pd.read_csv(uploaded_file, dtype=dtype_overrides, low_memory=False)
+        st.success("✅ Data uploaded and loaded successfully!")
+    except Exception as e:
+        st.error(f"❌ Failed to read file: {e}")
+else:
+    st.warning("👆 Please upload a CSV file to continue.")
+
 
 # Lbs per length conversion (Flat)
 def lbs_per_length(distance_f):
