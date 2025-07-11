@@ -101,7 +101,6 @@ def performance_rating(row, winner_rating, winner_weight, lbs_per_len):
 if 'Type' not in df.columns:
     st.error("❌ The uploaded file is missing the required column: 'Type'.")
     st.stop()
-)
 
 # Calculate distance and adjusted weight
 df['DistanceF'] = df.apply(get_distance_f, axis=1)
