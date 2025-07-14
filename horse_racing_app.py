@@ -87,7 +87,10 @@ if uploaded_file is not None:
             st.error("❌ The uploaded file is missing the required column: 'Type'.")
             st.stop()
 
-        df['RaceCode'] = df['Type'].map(lambda x: 'Flat' if x in ['f', 'a'] else 'Jumps')
+        # ✅ Normalize and correctly map flat vs jumps
+        df['Type'] = df['Type'].str.strip().str.lower()
+        df['RaceCode'] = df['Type'].map(lambda x: 'Flat' if x in ['f', 'a', 'af', 'fa'] else 'Jumps')
+
         df['DistanceF'] = df.apply(get_distance_f, axis=1)
         df['AdjWeight'] = df.apply(adjust_weight, axis=1)
 
@@ -152,10 +155,10 @@ if uploaded_file is not None:
         output_path = os.path.join(temp_dir, "horse_ability_trend_scores.csv")
         final_scores.to_csv(output_path, index=False)
 
-        # 🎯 Let user download file
+        # 🌟 Let user download file
         with open(output_path, "rb") as f:
             st.download_button(
-                label="📥 Download Final Ability Scores CSV",
+                label="📅 Download Final Ability Scores CSV",
                 data=f,
                 file_name="horse_ability_trend_scores.csv",
                 mime="text/csv"
