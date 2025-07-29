@@ -1,1 +1,4 @@
 __pycache__/
+racing_data upload.csv
+racing_data_part_*.csv
+*.DS_Store
