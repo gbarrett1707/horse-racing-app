@@ -1,38 +1,20 @@
 import pandas as pd
 import numpy as np
 import os
+import tempfile
 from datetime import datetime
+import streamlit as st
 
-# Define your file path
-file_path = os.path.expanduser("~/Downloads/Racing Data Split/racing_data upload.csv")
+# App title and uploader
+st.title("🏇 Horse Ability & Trend Analyzer")
+uploaded_file = st.file_uploader("Upload your racing data CSV", type=["csv"])
 
-# Explicitly define column types to avoid dtype warnings
+# Define dtypes to avoid warnings
 dtype_overrides = {
-    'Id': str,
-    'Class': str,
-    'Prize': str,
-    'Ran': str,
-    'Yards': str,
-    'Limit': str,
-    'Seconds': str,
-    'TotalBtn': str,
-    'CardNo': str,
-    'Draw': str,
-    'Sp': str,
-    'Age': str,
-    'Stone': str,
-    'Lbs': str,
-    'WeightLBS': str,
-    'Allow': str,
-    'OR': str
+    'Id': str, 'Class': str, 'Prize': str, 'Ran': str, 'Yards': str, 'Limit': str,
+    'Seconds': str, 'TotalBtn': str, 'CardNo': str, 'Draw': str, 'Sp': str,
+    'Age': str, 'Stone': str, 'Lbs': str, 'WeightLBS': str, 'Allow': str, 'OR': str
 }
-
-# Load data
-df = pd.read_csv(file_path, dtype=dtype_overrides, low_memory=False)
-
-# Normalize and infer race type
-df['Type'] = df['Type'].str.strip().str.lower().fillna('')
-df['RaceCode'] = df['Type'].map(lambda x: 'Jumps' if x in ['h', 'c', 'b'] else 'Flat')
 
 # Lbs per length conversion (Flat)
 def lbs_per_length(distance_f):
@@ -82,53 +64,7 @@ def performance_rating(row, winner_rating, winner_weight, lbs_per_len):
     wt_diff = row['AdjWeight'] - winner_weight
     return winner_rating - (dist_btn * lbs_per_len) + wt_diff
 
-# Add calculated columns
-df['DistanceF'] = df.apply(get_distance_f, axis=1)
-df['AdjWeight'] = df.apply(adjust_weight, axis=1)
-
-df['FPos'] = pd.to_numeric(df['FPos'], errors='coerce')
-df = df.dropna(subset=['FPos'])
-df = df.sort_values(['Id', 'FPos'])
-
-# Store race-by-race ratings
-ratings = []
-
-for race_id, race_group in df.groupby('Id'):
-    race_type = race_group['RaceCode'].iloc[0]
-    dist_f = race_group['DistanceF'].mean()
-    lbs_len = lbs_per_length(dist_f) if race_type == 'Flat' else lbs_per_length_jumps(dist_f)
-
-    race_group = race_group.sort_values('FPos')
-    winner = race_group.iloc[0]
-
-    try:
-        winner_rating = float(winner['OR']) if pd.notna(winner['OR']) else 80
-    except:
-        winner_rating = 80
-
-    winner_weight = winner['AdjWeight']
-
-    for _, row in race_group.iterrows():
-        perf = performance_rating(row, winner_rating, winner_weight, lbs_len)
-        ratings.append({
-            'Horse': row['HorseName'],
-            'RaceDate': row['RaceDate'],
-            'Rating': perf,
-            'RaceType': race_type
-        })
-
-# Create performance DataFrame
-perf_df = pd.DataFrame(ratings)
-
-# Convert dates safely
-perf_df['RaceDate'] = pd.to_datetime(
-    perf_df['RaceDate'],
-    format="%d/%m/%y %H:%M:%S",
-    errors='coerce'
-)
-perf_df = perf_df.dropna(subset=['RaceDate'])
-
-# Trend slope function
+# Trend label logic
 def trend_slope(values):
     if len(values) < 2:
         return 0, "Stable"
@@ -140,36 +76,100 @@ def trend_slope(values):
     else:
         return slope, "Stable"
 
-# Aggregate horse-level metrics
-result = []
+# If file uploaded, process it
+if uploaded_file is not None:
+    try:
+        df = pd.read_csv(uploaded_file, dtype=dtype_overrides, low_memory=False)
+        st.success("✅ Data uploaded and loaded successfully!")
 
-for (horse, code), group in perf_df.groupby(['Horse', 'RaceType']):
-    group = group.sort_values('RaceDate')
-    ratings = list(group['Rating'])
+        if 'Type' not in df.columns:
+            st.error("❌ The uploaded file is missing the required column: 'Type'.")
+            st.stop()
 
-    if len(ratings) == 0:
-        continue
+        # Updated logic for Type classification
+        def classify_race(x):
+            if x in ['h', 'c', 'b']:
+                return 'Jumps'
+            else:
+                return 'Flat'
 
-    weights = [i+1 for i in range(len(ratings[-3:]))]
-    current = np.average(ratings[-3:], weights=weights)
-    slope, label = trend_slope(ratings[-5:])
+        df['RaceCode'] = df['Type'].fillna('').map(classify_race)
+        df['DistanceF'] = df.apply(get_distance_f, axis=1)
+        df['AdjWeight'] = df.apply(adjust_weight, axis=1)
 
-    result.append({
-        'Horse': horse,
-        'RaceType': code,
-        'CurrentAbility': round(current, 2),
-        'TrendScore': round(slope, 2),
-        'TrendCategory': label
-    })
+        df['FPos'] = pd.to_numeric(df['FPos'], errors='coerce')
+        df = df.dropna(subset=['FPos'])
+        df = df.sort_values(['Id', 'FPos'])
 
-# Final output
-final_scores = pd.DataFrame(result)
-final_scores.sort_values(['RaceType', 'CurrentAbility'], ascending=[True, False], inplace=True)
+        ratings = []
+        for race_id, race_group in df.groupby('Id'):
+            race_type = race_group['RaceCode'].iloc[0]
+            dist_f = race_group['DistanceF'].mean()
+            lbs_len = lbs_per_length(dist_f) if race_type == 'Flat' else lbs_per_length_jumps(dist_f)
 
-# Save to Downloads
-output_path = os.path.expanduser("~/Downloads/horse_ability_trend_scores.csv")
-final_scores.to_csv(output_path, index=False)
+            race_group = race_group.sort_values('FPos')
+            winner = race_group.iloc[0]
 
-print(f"✅ Saved ratings to: {output_path}")
-print(final_scores.head(10))
+            try:
+                winner_rating = float(winner['OR']) if pd.notna(winner['OR']) else 80
+            except:
+                winner_rating = 80
 
+            winner_weight = winner['AdjWeight']
+
+            for _, row in race_group.iterrows():
+                perf = performance_rating(row, winner_rating, winner_weight, lbs_len)
+                ratings.append({
+                    'Horse': row['HorseName'],
+                    'RaceDate': row['RaceDate'],
+                    'Rating': perf,
+                    'RaceType': race_type
+                })
+
+        perf_df = pd.DataFrame(ratings)
+        perf_df['RaceDate'] = pd.to_datetime(perf_df['RaceDate'], format="%d/%m/%y %H:%M:%S", errors='coerce')
+        perf_df = perf_df.dropna(subset=['RaceDate'])
+
+        result = []
+        for (horse, code), group in perf_df.groupby(['Horse', 'RaceType']):
+            group = group.sort_values('RaceDate')
+            ratings = list(group['Rating'])
+
+            if len(ratings) == 0:
+                continue
+
+            weights = [i+1 for i in range(len(ratings[-3:]))]
+            current = np.average(ratings[-3:], weights=weights)
+            slope, label = trend_slope(ratings[-5:])
+
+            result.append({
+                'Horse': horse,
+                'RaceType': code,
+                'CurrentAbility': round(current, 2),
+                'TrendScore': round(slope, 2),
+                'TrendCategory': label
+            })
+
+        final_scores = pd.DataFrame(result)
+        final_scores.sort_values(['RaceType', 'CurrentAbility'], ascending=[True, False], inplace=True)
+
+        # Save safely to temp folder
+        temp_dir = tempfile.gettempdir()
+        output_path = os.path.join(temp_dir, "horse_ability_trend_scores.csv")
+        final_scores.to_csv(output_path, index=False)
+
+        # Download button
+        with open(output_path, "rb") as f:
+            st.download_button(
+                label="📥 Download Final Ability Scores CSV",
+                data=f,
+                file_name="horse_ability_trend_scores.csv",
+                mime="text/csv"
+            )
+
+        st.success("✅ Processing complete! Your results are ready to download.")
+
+    except Exception as e:
+        st.error(f"❌ Error: {e}")
+else:
+    st.info("📂 Please upload a CSV file to get started.")
