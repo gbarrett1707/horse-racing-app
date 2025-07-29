@@ -17,7 +17,7 @@ def load_data():
 # Button to refresh data
 if st.button("🔄 Refresh Data"):
     st.cache_data.clear()
-    st.experimental_rerun()
+    st.rerun()
 
 # Try loading the data
 try:
