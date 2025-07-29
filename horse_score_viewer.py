@@ -1,29 +1,24 @@
 import streamlit as st
 import pandas as pd
-import os
 
+# Page setup
 st.set_page_config(page_title="Horse Ability Viewer", layout="centered")
-
 st.title("📊 Horse Ability & Trend Score Viewer")
 
-# Define the data path to load automatically
-DATA_PATH = os.path.join(os.path.dirname(__file__), "horse_ability_trend_scores_combined.csv")
+# Path to bundled CSV (ensure it's committed to the repo and under 100MB)
+DATA_FILE = "horse_ability_trend_scores_combined.csv"
 
-# Cache loading function
+# Load data from file (cached for performance)
 @st.cache_data
 def load_data():
-    return pd.read_csv(DATA_PATH)
+    return pd.read_csv(DATA_FILE)
 
-# Button to refresh data
-if st.button("🔄 Refresh Data"):
-    st.cache_data.clear()
-
-# Try loading the data
+# Load and display
 try:
     df = load_data()
-    st.success("✅ Data loaded successfully.")
+    st.success("✅ Data loaded successfully from file.")
 
-    # Search / Filter section
+    # Filter/search section
     with st.expander("🔍 Search / Filter"):
         horse_name = st.text_input("Filter by horse name:")
         if horse_name:
@@ -34,18 +29,15 @@ try:
 
     st.divider()
 
-    # Racecard builder
+    # Racecard Builder
     st.subheader("📋 Racecard Builder")
-
     selected_horses = st.multiselect("Select horses to compare:", df['Horse'].unique())
 
     if selected_horses:
         racecard_df = df[df['Horse'].isin(selected_horses)].copy()
         racecard_df = racecard_df[['Horse', 'RaceType', 'CurrentAbility']]
-
-        total_ability = racecard_df['CurrentAbility'].sum()
-        racecard_df['WinChance (%)'] = (racecard_df['CurrentAbility'] / total_ability * 100).round(2)
-
+        total = racecard_df['CurrentAbility'].sum()
+        racecard_df['WinChance (%)'] = (racecard_df['CurrentAbility'] / total * 100).round(2)
         racecard_df = racecard_df.sort_values("WinChance (%)", ascending=False).reset_index(drop=True)
 
         st.write("### 🏇 Racecard Comparison")
