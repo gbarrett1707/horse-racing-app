@@ -17,7 +17,6 @@ def load_data():
 # Button to refresh data
 if st.button("🔄 Refresh Data"):
     st.cache_data.clear()
-    st.rerun()
 
 # Try loading the data
 try:
@@ -54,4 +53,3 @@ try:
 
 except Exception as e:
     st.error(f"❌ Failed to load data: {e}")
-
