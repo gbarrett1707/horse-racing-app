@@ -1,41 +1,57 @@
 import streamlit as st
 import pandas as pd
+import os
 
-st.set_page_config(layout="centered", page_title="Horse Viewer", page_icon="📊")
+st.set_page_config(page_title="Horse Ability Viewer", layout="centered")
+
 st.title("📊 Horse Ability & Trend Score Viewer")
 
-uploaded_file = st.file_uploader("Upload combined ability scores CSV", type=["csv"])
+# Define the data path to load automatically
+DATA_PATH = os.path.join(os.path.dirname(__file__), "horse_ability_trend_scores_combined.csv")
 
-if uploaded_file is not None:
-    try:
-        df = pd.read_csv(uploaded_file)
-        st.success("✅ File uploaded and loaded!")
+# Cache loading function
+@st.cache_data
+def load_data():
+    return pd.read_csv(DATA_PATH)
 
-        # Display full table
-        st.dataframe(df)
+# Button to refresh data
+if st.button("🔄 Refresh Data"):
+    st.cache_data.clear()
+    st.experimental_rerun()
 
-        # 🔍 Filtering section
-        with st.expander("🔍 Search / Filter"):
-            horse_name = st.text_input("Filter by horse name:")
-            if horse_name:
-                filtered = df[df['Horse'].str.contains(horse_name, case=False)]
-                st.write(filtered)
+# Try loading the data
+try:
+    df = load_data()
+    st.success("✅ Data loaded successfully.")
 
-        # 📋 Racecard Builder
-        st.subheader("📋 Racecard Builder")
-        selected_horses = st.multiselect("Select horses to compare:", df['Horse'].unique())
+    # Search / Filter section
+    with st.expander("🔍 Search / Filter"):
+        horse_name = st.text_input("Filter by horse name:")
+        if horse_name:
+            filtered = df[df['Horse'].str.contains(horse_name, case=False)]
+            st.dataframe(filtered, use_container_width=True)
+        else:
+            st.dataframe(df, use_container_width=True)
 
-        if selected_horses:
-            racecard_df = df[df['Horse'].isin(selected_horses)].copy()
-            racecard_df = racecard_df[['Horse', 'RaceType', 'CurrentAbility']]
+    st.divider()
 
-            total_ability = racecard_df['CurrentAbility'].sum()
-            racecard_df['WinChance (%)'] = (racecard_df['CurrentAbility'] / total_ability * 100).round(2)
+    # Racecard builder
+    st.subheader("📋 Racecard Builder")
 
-            st.write("### 🏇 Racecard Comparison")
-            st.dataframe(racecard_df.reset_index(drop=True))
+    selected_horses = st.multiselect("Select horses to compare:", df['Horse'].unique())
 
-    except Exception as e:
-        st.error(f"❌ Failed to load CSV: {e}")
-else:
-    st.info("📂 Upload your combined score file to begin.")
+    if selected_horses:
+        racecard_df = df[df['Horse'].isin(selected_horses)].copy()
+        racecard_df = racecard_df[['Horse', 'RaceType', 'CurrentAbility']]
+
+        total_ability = racecard_df['CurrentAbility'].sum()
+        racecard_df['WinChance (%)'] = (racecard_df['CurrentAbility'] / total_ability * 100).round(2)
+
+        racecard_df = racecard_df.sort_values("WinChance (%)", ascending=False).reset_index(drop=True)
+
+        st.write("### 🏇 Racecard Comparison")
+        st.dataframe(racecard_df, use_container_width=True)
+
+except Exception as e:
+    st.error(f"❌ Failed to load data: {e}")
+
