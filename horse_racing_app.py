@@ -2,12 +2,15 @@ import pandas as pd
 import numpy as np
 import os
 import tempfile
+import zipfile
+import gzip
+import io
 from datetime import datetime
 import streamlit as st
 
 # App title and uploader
 st.title("🏇 Horse Ability & Trend Analyzer")
-uploaded_file = st.file_uploader("Upload your racing data CSV", type=["csv"])
+uploaded_file = st.file_uploader("Upload your racing data (.csv, .zip, or .gz)", type=["csv", "zip", "gz"])
 
 # Define dtypes to avoid warnings
 dtype_overrides = {
@@ -76,10 +79,31 @@ def trend_slope(values):
     else:
         return slope, "Stable"
 
+# Load CSV from .zip, .gz, or direct .csv
+def load_uploaded_file(uploaded_file):
+    if uploaded_file.name.endswith(".zip"):
+        with zipfile.ZipFile(uploaded_file, "r") as zip_ref:
+            csv_files = [f for f in zip_ref.namelist() if f.endswith(".csv")]
+            if not csv_files:
+                st.error("❌ No CSV file found in ZIP archive.")
+                return None
+            with zip_ref.open(csv_files[0]) as f:
+                return pd.read_csv(f, dtype=dtype_overrides, low_memory=False)
+
+    elif uploaded_file.name.endswith(".gz"):
+        with gzip.open(uploaded_file, mode="rt") as f:
+            return pd.read_csv(f, dtype=dtype_overrides, low_memory=False)
+
+    else:
+        return pd.read_csv(uploaded_file, dtype=dtype_overrides, low_memory=False)
+
 # If file uploaded, process it
 if uploaded_file is not None:
     try:
-        df = pd.read_csv(uploaded_file, dtype=dtype_overrides, low_memory=False)
+        df = load_uploaded_file(uploaded_file)
+        if df is None:
+            st.stop()
+
         st.success("✅ Data uploaded and loaded successfully!")
 
         if 'Type' not in df.columns:
@@ -172,4 +196,4 @@ if uploaded_file is not None:
     except Exception as e:
         st.error(f"❌ Error: {e}")
 else:
-    st.info("📂 Please upload a CSV file to get started.")
+    st.info("📂 Please upload a CSV, ZIP or GZ file to get started.")
