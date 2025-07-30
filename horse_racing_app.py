@@ -1,281 +1,331 @@
-import os
+import streamlit as st
 import pandas as pd
 import numpy as np
-import joblib
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
-import plotly.express as px
-import streamlit as st
+import altair as alt
+import logging
+from sklearn.ensemble import RandomForestClassifier
 
-# Set page configuration for Streamlit
-st.set_page_config(page_title="Horse Racing Predictor", page_icon="🐎", layout="wide")
+# Configure logging for debugging and tracing
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Title and description in the app
-st.title("🐎 Horse Racing Predictor & Racecard Builder")
-st.write("Explore horse racing data, view derived performance metrics, and predict win probabilities for each horse. Select a race from the sidebar to get started.")
+# Set page layout to wide for better display (optional)
+st.set_page_config(layout="wide", page_title="Horse Racing Analysis")
 
-# Load racing data (combine parts if necessary) with caching
+# Title and description
+st.title("Horse Racing Performance Viewer")
+st.write(
+    "This Streamlit app loads historical horse racing data, computes performance metrics, and "
+    "allows you to explore race results with predicted win probabilities for each horse."
+)
+
 @st.cache_data
 def load_data():
-    """Load and combine racing data into a single DataFrame, with basic cleaning and feature computation."""
-    # Possible file locations (compressed or uncompressed)
-    file_candidates = [
-        "racing_data_upload.csv.gz",    # combined data compressed
-        "racing_data upload.csv.gz",    # alternate naming
-        "racing_data_upload.csv"        # uncompressed CSV
-    ]
-    df = None
-    for file in file_candidates:
-        if os.path.exists(file):
-            try:
-                df = pd.read_csv(file, low_memory=False)
-                break
-            except Exception as e:
-                st.error(f"Error reading file '{file}': {e}")
-                st.stop()
-    if df is None:
-        st.error("Data files not found. Please ensure the racing data CSV files are available.")
-        st.stop()
-    # Verify required columns
-    required_cols = ['RaceDate', 'HorseName', 'FPos', 'Ran', 'Seconds', 'TotalBtn', 'Yards', 'WeightLBS', 'Age', 'Class', 'CardNo']
-    missing = [col for col in required_cols if col not in df.columns]
-    if missing:
-        st.error(f"Required data columns {missing} not found in input data. Please check the data format.")
-        st.stop()
-    # Compute horse finish times and speed ratings
-    # If TotalBtn (distance behind winner in lengths) is NaN (e.g., for non-finishers), HorseTime will be NaN
-    df['HorseTime'] = np.where(pd.isna(df['TotalBtn']), np.nan, df['Seconds'] + 0.2 * df['TotalBtn'])
-    df['SpeedRating'] = df['Yards'] / df['HorseTime']
-    df['SpeedRating'] = df['SpeedRating'].fillna(0.0)  # Non-finishers get 0 speed rating
-    # Clean and convert RaceDate and RaceTime for sorting
-    df['RaceDate_dt'] = pd.to_datetime(df['RaceDate'], dayfirst=True, errors='coerce')
-    # Some RaceDate entries might fail to parse if format is unexpected
-    if df['RaceDate_dt'].isna().all():
-        st.error("RaceDate column could not be parsed. Please check date format in data.")
-        st.stop()
-    # RaceTime might include an Excel base date (e.g., '12/30/99') – strip it to get actual time
-    df['RaceTime'] = df['RaceTime'].astype(str).str[-8:]
-    # Convert RaceTime to seconds from midnight for sorting
-    def time_to_seconds(t):
-        try:
-            h, m, s = t.split(':')
-            return int(h) * 3600 + int(m) * 60 + int(s)
-        except:
-            return 0
-    df['RaceTime_sec'] = df['RaceTime'].apply(time_to_seconds)
-    # Sort data chronologically by race date and time (and by Id to group same races)
-    df.sort_values(['RaceDate_dt', 'RaceTime_sec', 'Id'], inplace=True)
-    df.reset_index(drop=True, inplace=True)
-    return df
-
-# Cache the loaded data
-racing_df = load_data()
-
-# Train or load the machine learning model (cache result to avoid repeat training)
-@st.cache_resource
-def get_trained_model(data):
-    """Train a logistic regression model to predict race winners. Returns a trained model (pipeline)."""
-    # If a pre-trained model file exists, load it to save time
-    model_path = "horse_win_model.joblib"
-    if os.path.exists(model_path):
-        try:
-            model = joblib.load(model_path)
-            return model
-        except Exception as e:
-            # If loading fails, proceed to train a new model
-            st.warning(f"Could not load saved model: {e}. Retraining the model.")
-    # Prepare training feature matrix X and target vector y
-    X_features = []
-    y_target = []
-    # Initialize horse form ratings and speed history containers
-    form_rating = {}   # current trend/form rating for each horse
-    speed_history = {} # list of recent speed ratings for each horse
-    alpha = 0.7        # smoothing factor for trend score (higher -> more weight on past form)
-    # Iterate through races in chronological order to build features
-    for race_id, race_data in data.groupby('Id'):
-        # For each horse in this race, record features before the race
-        for _, row in race_data.iterrows():
-            horse = row['HorseName']
-            # Initialize horse tracking if first encounter
-            if horse not in form_rating:
-                form_rating[horse] = 50.0   # baseline form score
-                speed_history[horse] = []
-            # Feature 1: current trend/form score before this race
-            trend_score = form_rating[horse]
-            # Feature 2: average of last 3 speed ratings before this race
-            last3_speeds = speed_history[horse][-3:]
-            if last3_speeds:
-                # Treat NaN speeds as 0 in the average (e.g., if horse did not finish in one of those races)
-                clean_speeds = [0.0 if pd.isna(sp) else sp for sp in last3_speeds]
-                avg_speed = float(np.mean(clean_speeds))
-            else:
-                avg_speed = 0.0
-            # Feature 3: horse's age
-            age = float(row['Age']) if not pd.isna(row['Age']) else 0.0
-            # Feature 4: horse's carried weight in lbs
-            weight = float(row['WeightLBS']) if not pd.isna(row['WeightLBS']) else 0.0
-            # Feature 5: race class (numeric, lower is higher class)
-            race_class = float(row['Class']) if not pd.isna(row['Class']) else 0.0
-            # Feature 6: race distance in yards
-            distance = float(row['Yards']) if not pd.isna(row['Yards']) else 0.0
-            X_features.append([trend_score, avg_speed, age, weight, race_class, distance])
-            # Target: 1 if this horse won the race, 0 otherwise
-            won = 1 if (str(row['FPos']).isdigit() and int(row['FPos']) == 1) else 0
-            y_target.append(won)
-        # After computing features for all horses in the race, update each horse's form rating based on race results
-        for _, row in race_data.iterrows():
-            horse = row['HorseName']
-            ran = int(row['Ran']) if not pd.isna(row['Ran']) else 0
-            # Determine finishing position; if not a finisher (e.g., 'PU'), treat as last (position = ran)
-            if str(row['FPos']).isdigit():
-                pos = int(row['FPos'])
-            else:
-                pos = ran if ran > 0 else 0
-            # Compute performance metric (0 to 1, higher is better) for this race
-            perf = 1.0
-            if ran > 1:
-                perf = (ran - pos) / (ran - 1)  # e.g., winner gets 1.0, last gets 0.0
-            # Update trend/form rating using exponential smoothing
-            prev_rating = form_rating[horse]
-            new_rating = alpha * prev_rating + (1 - alpha) * (perf * 100)
-            form_rating[horse] = new_rating
-            # Update speed history with this race's speed rating
-            sp = float(row['SpeedRating']) if not pd.isna(row['SpeedRating']) else 0.0
-            speed_history[horse].append(sp)
-    X = np.array(X_features)
-    y = np.array(y_target)
-    # Train a logistic regression model with standard scaling
-    model_pipeline = make_pipeline(StandardScaler(), LogisticRegression(max_iter=500, class_weight='balanced'))
-    model_pipeline.fit(X, y)
-    # Save the model for future use
+    """Load and preprocess the racing data from a CSV file."""
+    data_file = "racing_data_upload.csv.gz"
     try:
-        joblib.dump(model_pipeline, model_path)
+        # Read the compressed CSV data
+        df = pd.read_csv(data_file, low_memory=False)
+        logger.info(f"Loaded data file '{data_file}' successfully with shape {df.shape}")
+    except FileNotFoundError as e:
+        logger.error(f"Data file '{data_file}' not found. Exception: {e}", exc_info=True)
+        st.error(f"Error: Data file '{data_file}' not found. Please ensure the file is present.")
+        st.stop()
     except Exception as e:
-        st.warning(f"Could not save model to disk: {e}")
-    return model_pipeline
+        logger.error(f"Failed to read data file. Exception: {e}", exc_info=True)
+        st.error(f"Error: Could not load the data due to an unexpected error.")
+        st.stop()
 
-# Get trained model (this will load from cache or train if not already cached)
-model = get_trained_model(racing_df)
+    # Ensure required columns are present
+    required_cols = {"RaceDate", "Course", "Race", "Yards", "Seconds", "HorseName", "FPos"}
+    missing_cols = required_cols - set(df.columns)
+    if missing_cols:
+        logger.error(f"Missing required columns: {missing_cols}")
+        st.error(f"Error: The data is missing required columns: {', '.join(missing_cols)}. "
+                 "Cannot continue without these columns.")
+        st.stop()
 
-# Prepare sidebar for race selection
-st.sidebar.header("Race Selection")
-# Create a sorted list of races for selection (format: "Date – Course – RaceName")
-race_options = []
-race_summary = racing_df.groupby('Id').first()  # one representative row per race
-race_summary = race_summary.sort_values(['RaceDate_dt', 'RaceTime_sec'])
-for rid, row in race_summary.iterrows():
-    date_str = row['RaceDate_dt'].strftime("%d %b %Y")
-    course = row['Course']
-    race_name = row['Race']
-    race_options.append(f"{date_str} – {course} – {race_name} (Id {rid})")
-# Sidebar selectbox for races
-selected_label = st.sidebar.selectbox("Select a race:", race_options)
-# Extract race Id from the selected label (the Id is at the end in parentheses)
-try:
-    selected_id = int(selected_label.split("Id")[-1].strip().strip(')'))
-except:
-    # Fallback: parse by finding the last part after the last '–'
-    parts = selected_label.split("–")
-    selected_id = int(parts[-1].split()[-1]) if parts else None
+    # Parse RaceDate and RaceTime into a proper datetime for sorting
+    # Clean RaceDate (remove time if present) and RaceTime (remove any date component)
+    date_str = df["RaceDate"].astype(str).str.strip()
+    date_str = date_str.str.replace(r"\s*00:00:00", "", regex=True)  # remove " 00:00:00" if present
 
-if not selected_id or selected_id not in racing_df['Id'].values:
-    st.error("Invalid race selection.")
-    st.stop()
+    time_str = df["RaceTime"].astype(str).str.strip()
+    # If there's a date portion in RaceTime (e.g., "12/30/99 12:45:00"), remove it
+    time_str = time_str.str.split(" ").str[-1]
+    # Ensure time has seconds component for uniform format
+    time_str = time_str.apply(lambda t: t + ":00" if t and ":" in t and t.count(":") == 1 else t)
 
-# Filter data for the selected race
-race_df = racing_df[racing_df['Id'] == selected_id].copy()
-if race_df.empty:
-    st.error("No data found for the selected race.")
-    st.stop()
+    # Combine date and time strings and parse into datetime
+    combined_dt = date_str + " " + time_str
+    # Use dayfirst=True to correctly interpret formats like "31-May-25" and "01/01/25"
+    df["RaceDateTime"] = pd.to_datetime(combined_dt, dayfirst=True, errors="coerce")
 
-# Get race metadata from the first entry
-race_info = race_df.iloc[0]
-race_date = race_info['RaceDate_dt'].strftime("%d %b %Y")
-race_course = race_info['Course']
-race_name = race_info['Race']
-race_class = race_info['Class'] if not pd.isna(race_info['Class']) else "N/A"
-race_age = race_info['AgeLimit'] if isinstance(race_info['AgeLimit'], str) else ""
-race_going = race_info['Going'] if isinstance(race_info['Going'], str) else ""
-race_distance = race_info['Distance'] if isinstance(race_info['Distance'], str) else f"{int(race_info['Yards'])}y"
+    # If any datetimes failed to parse, log a warning
+    if df["RaceDateTime"].isnull().any():
+        num_null = df["RaceDateTime"].isnull().sum()
+        logger.warning(f"Warning: {num_null} RaceDateTime entries could not be parsed.")
+        # Attempt a secondary parse for any unparsed entries (try different format assumptions if needed)
+        # For robustness, we can try common alternate formats on the failed ones
+        failed_idxs = df[df["RaceDateTime"].isnull()].index
+        for idx in failed_idxs:
+            raw_date = str(df.at[idx, "RaceDate"]).strip()
+            raw_time = str(df.at[idx, "RaceTime"]).strip()
+            try:
+                # Try swapping dayfirst False if initial failed
+                parsed = pd.to_datetime(raw_date + " " + raw_time, dayfirst=False)
+                df.at[idx, "RaceDateTime"] = parsed
+            except Exception:
+                pass  # Leave as NaT if still fails
+        if df["RaceDateTime"].isnull().any():
+            # If still null, alert the user but continue
+            st.warning("Some race dates/times could not be parsed. These entries will be handled as unknown dates.")
 
-# Display race header information
-st.subheader(f"**{race_course} – {race_name}**")
-st.write(f"**Date:** {race_date}  |  **Class:** {race_class}  |  **Age Limit:** {race_age}  |  **Going:** {race_going}  |  **Distance:** {race_distance}")
+    # Sort the DataFrame by RaceDateTime to prepare for grouping and trend calculations
+    df.sort_values("RaceDateTime", inplace=True)
+    logger.info("Parsed RaceDate and RaceTime into a combined datetime and sorted the data chronologically.")
 
-# Compute prediction features for each horse in the selected race (using only past data up to this race)
-pred_features = []
-for _, horse_row in race_df.iterrows():
-    horse = horse_row['HorseName']
-    # Filter this horse's past races (strictly before the selected race's date/time)
-    hist = racing_df[(racing_df['HorseName'] == horse) &
-                     ((racing_df['RaceDate_dt'] < race_info['RaceDate_dt']) |
-                      ((racing_df['RaceDate_dt'] == race_info['RaceDate_dt']) & 
-                       (racing_df['RaceTime_sec'] < race_info['RaceTime_sec'])))]
-    # Calculate horse's trend score prior to this race
-    curr_rating = 50.0
-    past_speeds = []
-    if not hist.empty:
-        hist = hist.sort_values(['RaceDate_dt', 'RaceTime_sec'])
-        for _, past_row in hist.iterrows():
-            ran = int(past_row['Ran']) if not pd.isna(past_row['Ran']) else 0
-            if str(past_row['FPos']).isdigit():
-                pos = int(past_row['FPos'])
+    # Calculate SpeedRating = Yards / Seconds, handle missing or zero times gracefully
+    df["SpeedRating"] = np.nan
+    # Only compute if Yards and Seconds are valid positive numbers
+    valid_time_mask = df["Seconds"].notna() & (df["Seconds"] > 0) & df["Yards"].notna() & (df["Yards"] > 0)
+    df.loc[valid_time_mask, "SpeedRating"] = df.loc[valid_time_mask, "Yards"] / df.loc[valid_time_mask, "Seconds"]
+    # Log if any speed ratings could not be computed due to missing data
+    num_no_speed = len(df) - valid_time_mask.sum()
+    if num_no_speed > 0:
+        logger.info(f"SpeedRating could not be calculated for {num_no_speed} entries (missing or zero values in Yards/Seconds).")
+
+    # Compute ability and trend scores for each horse
+    ability_list = []
+    trend_list = []
+    horse_list = []
+
+    # Group by HorseName and calculate ability and trend
+    for horse, grp in df.groupby("HorseName"):
+        # Ensure the group is sorted by RaceDateTime (df is already sorted globally)
+        # Calculate ability as the mean SpeedRating of all completed races (skip NaN speeds)
+        # Calculate trend as difference between last race SpeedRating and the horse's previous average SpeedRating
+        horse_list.append(horse)
+        # Ability score: average of SpeedRating (skip NaN values)
+        if grp["SpeedRating"].notna().any():
+            ability_val = grp["SpeedRating"].mean(skipna=True)
+        else:
+            ability_val = np.nan  # no finished races
+        # Determine last race's SpeedRating (the last row in this group, which is the most recent race)
+        last_speed = grp.iloc[-1]["SpeedRating"]
+        if len(grp) <= 1:
+            # Only one race (or none finished) -> no prior race to compare, trend is 0
+            trend_val = 0.0
+        else:
+            # Compute the mean SpeedRating of all previous races (exclude the last race's entry)
+            prev_mean = grp.iloc[:-1]["SpeedRating"].mean(skipna=True)
+            if pd.isna(last_speed):
+                # Last race did not have a recorded SpeedRating (e.g., did not finish)
+                if not np.isnan(prev_mean):
+                    # If there were previous finished races, trend is negative (0 minus previous average)
+                    trend_val = 0.0 - prev_mean
+                else:
+                    # No previous finished races either (all races were DNF)
+                    trend_val = 0.0
             else:
-                pos = ran if ran > 0 else 0
-            perf = 1.0
-            if ran > 1:
-                perf = (ran - pos) / (ran - 1)
-            curr_rating = alpha * curr_rating + (1 - alpha) * (perf * 100)
-            past_speeds.append(float(past_row['SpeedRating']) if not pd.isna(past_row['SpeedRating']) else 0.0)
-    # Average of last 3 speeds before this race
-    if past_speeds:
-        last3 = past_speeds[-3:]
-        clean_last3 = [0.0 if pd.isna(x) else x for x in last3]
-        avg_speed = float(np.mean(clean_last3))
-    else:
-        avg_speed = 0.0
-    age = float(horse_row['Age']) if not pd.isna(horse_row['Age']) else 0.0
-    weight = float(horse_row['WeightLBS']) if not pd.isna(horse_row['WeightLBS']) else 0.0
-    race_class_val = float(horse_row['Class']) if not pd.isna(horse_row['Class']) else 0.0
-    distance_val = float(horse_row['Yards']) if not pd.isna(horse_row['Yards']) else 0.0
-    pred_features.append([curr_rating, avg_speed, age, weight, race_class_val, distance_val])
+                if np.isnan(prev_mean):
+                    # Last race was the first finished race (no prior finished races)
+                    trend_val = 0.0
+                else:
+                    trend_val = last_speed - prev_mean
+        ability_list.append(ability_val)
+        trend_list.append(trend_val)
+    # Create a DataFrame for horse stats and merge back to main DataFrame
+    horse_stats_df = pd.DataFrame({
+        "HorseName": horse_list,
+        "AbilityScore": ability_list,
+        "TrendScore": trend_list
+    })
+    # Merge ability and trend into the main DataFrame
+    df = df.merge(horse_stats_df, on="HorseName", how="left")
 
-pred_features = np.array(pred_features)
-# Get win probability predictions for each horse in the race
-probs = model.predict_proba(pred_features)[:, 1]
-# Normalize probabilities so they sum to 1 (for a clearer comparison as a percentage)
-if probs.sum() > 0:
-    probs = probs / probs.sum()
-# Add predictions to the race DataFrame
-race_df['PredProb'] = probs
-race_df['WinProb(%)'] = (race_df['PredProb'] * 100).round(1)
+    # Replace any remaining NaN in AbilityScore or TrendScore with 0 (for horses with no completed races)
+    df["AbilityScore"].fillna(0.0, inplace=True)
+    df["TrendScore"].fillna(0.0, inplace=True)
 
-# Highlight the top pick with a star
-if len(race_df) > 0:
-    top_idx = race_df['PredProb'].idxmax()
-    race_df.at[top_idx, 'HorseName'] = "★ " + str(race_df.at[top_idx, 'HorseName'])
+    logger.info("Computed ability and trend scores for each horse and merged into main DataFrame.")
 
-# Rename finishing position column for clarity
-race_df.rename(columns={'FPos': 'Result'}, inplace=True)
+    # Prepare a summary of unique races for the selectors (one entry per race)
+    # We'll use the first occurrence (which is likely the winner or first listed) for each race ID
+    race_summary = df.drop_duplicates(subset="Id", keep="first").copy()
+    # Extract just the date (without time) for selection use
+    race_summary["RaceDate_only"] = race_summary["RaceDateTime"].dt.date
+    # Sort race_summary by date and time
+    race_summary.sort_values("RaceDateTime", inplace=True)
 
-# Sort horses by their race card number (CardNo) for display
-race_df.sort_values('CardNo', inplace=True)
+    return df, race_summary
 
-# Select and arrange columns for the output table
-display_cols = ['CardNo', 'HorseName', 'Age', 'WeightLBS', 'Jockey', 'Trainer', 'Sp', 'WinProb(%)', 'Result']
-race_display = race_df[display_cols].reset_index(drop=True)
+# Load and process data (cached)
+df, race_summary = load_data()
 
-# Show the race card table with predictions
-st.write("**Racecard and Predictions:**")
-st.dataframe(race_display.style.format({"WinProb(%)": "{:.1f}"}), height=400)
+# Prepare options for selectors
+# Unique race dates (as Python date objects) sorted, latest first
+unique_dates = sorted(race_summary["RaceDate_only"].unique(), reverse=True)
+if not unique_dates:
+    st.error("No race dates found in the data.")
+    st.stop()
 
-# Plot an interactive bar chart of predicted win probabilities
-chart_df = race_df[['HorseName', 'PredProb']].copy()
-chart_df.sort_values('PredProb', ascending=False, inplace=True)
-fig = px.bar(chart_df, x='HorseName', y='PredProb', 
-             title="Predicted Win Probability by Horse", 
-             labels={'HorseName': 'Horse', 'PredProb': 'Win Probability'})
-fig.update_layout(yaxis_tickformat='.0%', yaxis_title='Win Probability', xaxis_title=None)
-fig.update_traces(texttemplate='%{y:.1%}', textposition='outside', marker_color='skyblue')
-st.plotly_chart(fig, use_container_width=True)
+# Race Date selector
+selected_date = st.selectbox("Select Race Date", unique_dates, index=0,
+                             format_func=lambda x: x.strftime("%d %b %Y") if isinstance(x, (pd.Timestamp, np.datetime64)) or hasattr(x, "strftime") else str(x))
+# Filter tracks available on the selected date
+tracks_on_date = race_summary[race_summary["RaceDate_only"] == selected_date]["Course"].unique()
+tracks_on_date.sort()
+if len(tracks_on_date) == 0:
+    st.warning("No races found for the selected date. Please choose a different date.")
+    st.stop()
+selected_track = st.selectbox("Select Track", tracks_on_date, index=0)
+
+# Filter races for the selected date and track
+races_filtered = race_summary[(race_summary["RaceDate_only"] == selected_date) & (race_summary["Course"] == selected_track)]
+if races_filtered.empty:
+    st.warning("No races found for the selected date and track.")
+    st.stop()
+
+# Create a mapping from Race Id to a display label (time and race name)
+race_options = races_filtered.copy()
+# Format RaceTime for display (use RaceDateTime or RaceTimeClean if exists)
+if "RaceTimeClean" in race_options.columns:
+    # If we had stored a cleaned time string in preprocessing (not explicitly in code above, but could reuse RaceDateTime)
+    # We can derive time string from RaceDateTime for display
+    race_options["DisplayTime"] = race_options["RaceDateTime"].dt.strftime("%H:%M")
+else:
+    race_options["DisplayTime"] = race_options["RaceDateTime"].dt.strftime("%H:%M")
+race_options["DisplayLabel"] = race_options["DisplayTime"] + " - " + race_options["Race"] + " (" + race_options["Ran"].astype(str) + " runners)"
+race_id_list = race_options["Id"].tolist()
+label_dict = dict(zip(race_options["Id"], race_options["DisplayLabel"]))
+
+selected_race_id = st.selectbox("Select Race", race_id_list, format_func=lambda x: label_dict.get(x, str(x)))
+
+# Now retrieve the data for the selected race
+race_df = df[df["Id"] == selected_race_id].copy()
+if race_df.empty:
+    st.error("Error: No data found for the selected race.")
+    st.stop()
+
+# Sort the race entries by finishing position if available (1st, 2nd, etc.)
+# FPos might be numeric or strings like 'PU', so we handle sorting carefully:
+# We'll create a sort key that puts winners (FPos=1) first, then 2, 3, ... and non-finishers at the end.
+def sort_key(pos):
+    """
+    Generate a sort key for finishing position. Numeric positions come first in order, 
+    non-numeric (e.g., 'PU', 'F') come last in original order.
+    """
+    try:
+        # Convert to int if possible (this will work for numeric strings and ints)
+        return (0, int(pos))
+    except:
+        # Non-numeric positions get a large default sort value
+        return (1, float('inf'))
+
+race_df["FPos_str"] = race_df["FPos"].astype(str).str.strip()  # ensure string type for FPos
+race_df.sort_values(by="FPos_str", key=lambda col: col.map(sort_key), inplace=True)
+race_df.drop(columns=["FPos_str"], inplace=True)
+
+# Identify the winner(s) of the race for display
+# There could be ties, but we'll assume one winner for simplicity (FPos == 1)
+race_df["WinnerFlag"] = race_df["FPos"].astype(str).str.strip().apply(lambda x: True if x == "1" else False)
+
+# Prepare features for prediction
+features = ["AbilityScore", "TrendScore", "OR", "Age", "WeightLBS"]
+# Ensure the necessary columns for model features exist; if not, we adjust
+for col in features:
+    if col not in df.columns:
+        # Fallback: if any feature column missing, drop it from feature list
+        features.remove(col)
+        logger.warning(f"Feature '{col}' is missing in data. It will be omitted from the model.")
+
+# Prepare and train the machine learning model (RandomForest) to predict win probability
+@st.cache_resource
+def train_model(df, feature_cols):
+    """Train a RandomForestClassifier on the historical data to predict race winners."""
+    # Define target: winner or not
+    y = (df["FPos"].astype(str).str.strip() == "1").astype(int)
+    # Filter out any entries where required feature data is missing
+    X = df[feature_cols].copy()
+    # Fill any remaining NaNs in features with 0 (safe fallback for missing numerical data)
+    X = X.fillna(0)
+    # Train the Random Forest model
+    model = RandomForestClassifier(n_estimators=100, random_state=0)
+    model.fit(X, y)
+    logger.info(f"Trained RandomForest model with {len(feature_cols)} features on {len(X)} samples.")
+    return model
+
+model = None
+if features:
+    try:
+        model = train_model(df, features)
+    except Exception as e:
+        logger.error(f"Model training failed: {e}", exc_info=True)
+        st.warning("Warning: The machine learning model could not be trained due to an error. "
+                   "Predictions will not be available.")
+        model = None
+else:
+    st.warning("Insufficient feature columns for model training. Predictions are disabled.")
+
+# If model is available, compute win probabilities for each horse in the selected race
+if model is not None:
+    X_race = race_df[features].copy().fillna(0)
+    # Get probability of class "1" (winning) for each horse
+    win_proba = model.predict_proba(X_race)[:, 1]
+    race_df["WinProbability"] = win_proba
+    # Convert probability to percentage string for display
+    race_df["WinProbabilityPct"] = (race_df["WinProbability"] * 100).map(lambda x: f"{x:.1f}%")
+    logger.info("Computed win probabilities for horses in the selected race.")
+else:
+    race_df["WinProbabilityPct"] = "N/A"
+
+# Display race information and results
+race_title = race_options[race_options["Id"] == selected_race_id]["Race"].iloc[0]
+race_time_str = race_options[race_options["Id"] == selected_race_id]["DisplayTime"].iloc[0]
+st.subheader(f"Race Details: {race_title}")
+st.write(f"**Date:** {selected_date.strftime('%d %b %Y')}  |  **Track:** {selected_track}  |  **Time:** {race_time_str}  |  **Runners:** {len(race_df)}")
+
+# Show an interactive table of the race entrants with their details and predicted win probabilities
+# Select relevant columns to display
+display_cols = ["HorseName", "Age", "WeightLBS", "OR", "AbilityScore", "TrendScore", "WinProbabilityPct", "FPos", "Jockey", "Trainer"]
+# Filter out columns not in data (in case some are missing in certain dataset variations)
+display_cols = [col for col in display_cols if col in race_df.columns]
+# Rename columns for clarity in the UI
+col_rename = {
+    "HorseName": "Horse",
+    "WeightLBS": "Weight (lbs)",
+    "OR": "Official Rating",
+    "AbilityScore": "Ability Score",
+    "TrendScore": "Trend Score",
+    "WinProbabilityPct": "Win Probability",
+    "FPos": "Finish Position"
+}
+race_display_df = race_df[display_cols].rename(columns=col_rename)
+
+# Highlight the winner row in the table for clarity (if any)
+def highlight_winner(row):
+    return ['background-color: gold' if str(row.get("Finish Position", "")).strip() == "1" or row.get("Finish Position", "") == 1 else '' for _ in row]
+
+# Use st.dataframe with styling
+st.dataframe(race_display_df.style.apply(highlight_winner, axis=1), use_container_width=True)
+
+# Additionally, display a bar chart of win probabilities if available
+if model is not None:
+    chart_data = race_df.copy()
+    chart_data.sort_values("WinProbability", ascending=True, inplace=True)  # sort by probability for better plotting
+    # Use horse names as y-axis and win probability as x-axis for a horizontal bar chart
+    bar_chart = alt.Chart(chart_data).mark_bar().encode(
+        x=alt.X("WinProbability", title="Predicted Win Probability", axis=alt.Axis(format='%')),
+        y=alt.Y("HorseName", title="Horse", sort=None)  # sort=None to use data order (already sorted by prob)
+    )
+    text = alt.Chart(chart_data).mark_text(
+        align='left',
+        baseline='middle',
+        dx=3  # adjust text position
+    ).encode(
+        x=alt.X("WinProbability", aggregate=None),
+        y=alt.Y("HorseName", sort=None),
+        text=alt.Text("WinProbability", format=".1%")
+    )
+    st.altair_chart(bar_chart + text, use_container_width=True)
