@@ -214,12 +214,16 @@ if not stats_df.empty:
     st.subheader("Recent SpeedRating Trends (last 5 runs)")
     for i, row in stats_df.iterrows():
         st.markdown(f"**{row['Horse']}**: " +
-            " → ".join([f\"{x:.2f}\" for x in row['Last5SpeedRatings']]))
-        fig = px.line(x=list(range(1, len(row['Last5SpeedRatings'])+1)), y=row['Last5SpeedRatings'],
-                      markers=True, title=f\"SpeedRating Trend: {row['Horse']}\")
-        fig.update_layout(showlegend=False, xaxis_title=\"Run #\", yaxis_title=\"SpeedRating\")
+            " → ".join([f"{x:.2f}" for x in row['Last5SpeedRatings']]))
+        fig = px.line(
+            x=list(range(1, len(row['Last5SpeedRatings'])+1)),
+            y=row['Last5SpeedRatings'],
+            markers=True,
+            title=f"SpeedRating Trend: {row['Horse']}"
+        )
+        fig.update_layout(showlegend=False, xaxis_title="Run #", yaxis_title="SpeedRating")
         st.plotly_chart(fig, use_container_width=True)
 
-    st.download_button(\"📥 Download Custom Racecard Stats\", stats_df.to_csv(index=False), file_name=\"custom_racecard_stats.csv\")
+    st.download_button("📥 Download Custom Racecard Stats", stats_df.to_csv(index=False), file_name="custom_racecard_stats.csv")
 else:
-    st.warning(\"No runners found for this selection.\")
+    st.warning("No runners found for this selection.")
