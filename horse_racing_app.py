@@ -4,6 +4,7 @@ import numpy as np
 from datetime import timedelta
 from sklearn.linear_model import LogisticRegression
 from sklearn.dummy import DummyClassifier
+from sklearn.preprocessing import MinMaxScaler
 import plotly.express as px
 
 st.set_page_config(page_title="Horse Racing Custom Racecard", page_icon="🐎", layout="wide")
@@ -13,11 +14,10 @@ st.write("Build your own racecard, compare horses from any date/track, and view 
 @st.cache_data
 def load_data():
     df = pd.read_csv("racing_data_upload.csv.gz", low_memory=False)
-    # Convert columns to correct types up front
+    # Types
     df['RaceDate'] = pd.to_datetime(df['RaceDate'], errors='coerce')
     if 'RaceTime' in df.columns:
         df['RaceTime'] = pd.to_datetime(df['RaceTime'], errors='coerce')
-    # Ensure Yards and Seconds are numeric (fix for error)
     df['Yards'] = pd.to_numeric(df['Yards'], errors='coerce')
     df['Seconds'] = pd.to_numeric(df['Seconds'], errors='coerce')
     df['OR'] = pd.to_numeric(df['OR'], errors='coerce')
@@ -25,24 +25,11 @@ def load_data():
     df['HorseName'] = df['HorseName'].astype(str)
     df['Trainer'] = df['Trainer'].astype(str)
     df['Jockey'] = df['Jockey'].astype(str)
-    # Calculate SpeedRating (only if Seconds > 0)
+    # Calculate SpeedRating safely
     mask = df['Yards'].notnull() & df['Seconds'].notnull() & (df['Seconds'] > 0)
     df.loc[mask, 'SpeedRating'] = df.loc[mask, 'Yards'] / df.loc[mask, 'Seconds']
     df['Win'] = (df['FPos_num'] == 1).astype(int)
-    # Drop rows missing critical info for ML/stats
     df = df.dropna(subset=['HorseName', 'RaceDate', 'SpeedRating'])
-    # Add runner form for each horse (last 5 runs)
-    df = df.sort_values(['HorseName', 'RaceDate'])
-    df['Last5SpeedRatings'] = (
-        df.groupby('HorseName')['SpeedRating']
-        .rolling(window=5, min_periods=1).apply(lambda x: list(x), raw=False)
-        .reset_index(level=0, drop=True)
-    )
-    # Add consistency (stddev over last 5 runs)
-    df['Consistency'] = (
-        df.groupby('HorseName')['SpeedRating']
-        .rolling(window=5, min_periods=2).std().reset_index(level=0, drop=True)
-    )
     # Trainer/jockey win%
     trainer_win = df.groupby('Trainer').apply(lambda x: (x['FPos_num']==1).mean()*100 if 'FPos_num' in x else np.nan)
     jockey_win = df.groupby('Jockey').apply(lambda x: (x['FPos_num']==1).mean()*100 if 'FPos_num' in x else np.nan)
@@ -59,7 +46,6 @@ def load_data():
     return df
 
 df = load_data()
-
 if df is None or df.empty:
     st.error("No data loaded! Please check your source file.")
     st.stop()
@@ -74,25 +60,23 @@ if not selected_horses:
     st.stop()
 
 custom_race_df = df[df['HorseName'].isin(selected_horses)].copy()
-
-# Always show latest row per horse for current ability, plus last 5 runs
 custom_race_df = custom_race_df.sort_values('RaceDate')
-latest_rows = (
-    custom_race_df.groupby("HorseName", as_index=False)
-    .last()
-)
+# Get the latest row per horse (current ability etc)
+latest_rows = custom_race_df.groupby("HorseName", as_index=False).last()
 
 # Build stats per runner
 def build_runner_stats(row):
+    # Last 5 runs, most consistent, fastest, etc
     horse_hist = df[df['HorseName'] == row['HorseName']].sort_values('RaceDate').tail(5)
     last5_speeds = horse_hist['SpeedRating'].tolist()
     fastest_last_run = np.nanmax(last5_speeds) if last5_speeds else np.nan
     most_consistent = np.nanstd(last5_speeds) if len(last5_speeds) > 1 else np.nan
+    avg_ability = np.nanmean(last5_speeds) if last5_speeds else np.nan
     return pd.Series({
         "Last5SpeedRatings": " → ".join([f"{x:.2f}" for x in last5_speeds]),
         "FastestLastRun": fastest_last_run,
         "Consistency5": most_consistent,
-        "AvgAbility": np.nanmean(last5_speeds),
+        "AvgAbility": avg_ability,
         "TrainerInForm": row['TrainerWinPct'],
         "JockeyInForm": row['JockeyWinPct'],
         "HorsePrefTrack": row['HorsePrefTrack'],
@@ -104,13 +88,12 @@ runner_stats = latest_rows.apply(build_runner_stats, axis=1)
 display_df = pd.concat([latest_rows.reset_index(drop=True), runner_stats], axis=1)
 
 # --- Predict win probabilities (Logistic Regression heuristic) ---
-features = ['SpeedRating', 'Consistency', 'TrainerWinPct', 'JockeyWinPct', 'FastestLastRun', 'AvgAbility']
+features = ['SpeedRating', 'Consistency5', 'TrainerInForm', 'JockeyInForm', 'FastestLastRun', 'AvgAbility']
 for f in features:
     if f not in display_df.columns:
         display_df[f] = np.nan
 X = display_df[features].fillna(0).values
 
-from sklearn.preprocessing import MinMaxScaler
 scaler = MinMaxScaler()
 X_scaled = scaler.fit_transform(X)
 
